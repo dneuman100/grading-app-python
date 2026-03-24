@@ -7,6 +7,7 @@ This project is a Python-based desktop application designed to streamline the gr
 - Allows point marking and annotation via GUI (Tkinter)
 - Supports partial credit and undo functionality
 - Exports grading results to Excel
+- Supports user-defined annotation labels, dynamically updating the interface to incorporate new inputs into the grading workflow
 - Annotations are saved as a transparent overlay layer, allowing feedback to be printed directly onto physical test papers without re-printing the underlying exam
 
 ## Tech Stack
