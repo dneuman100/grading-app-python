@@ -38,3 +38,4 @@ This project is actively being improved, including usability enhancements and ad
 ## Future Improvements
 - Transition from page-based grading to question-based grading to improve workflow efficiency
 - Explore mobile and tablet compatibility to enable grading workflows across devices
+- Integrate with learning management system (LMS) APIs (e.g., Google Classroom) for streamlined assignment syncing and grading workflows
