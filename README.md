@@ -24,3 +24,9 @@ This project is actively being improved, including usability enhancements and ad
 
 ## Next Steps
 - Add zoom in / zoom out functionality
+- Enable saving and resuming grading sessions across multiple assessments
+- Support grading multi-page assessments seamlessly
+
+## Future Improvements
+- Transition from page-based grading to question-based grading to improve workflow efficiency
+- Explore mobile and tablet compatibility to enable grading workflows across devices
