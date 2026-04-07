@@ -4,7 +4,6 @@ from tkinter import *
 from PIL import Image, ImageTk, ImageOps, ImageDraw, ImageFont
 from pdf2image import convert_from_path
 import os
-import openpyxl
 from openpyxl import Workbook
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -28,15 +27,18 @@ class PDFtoImageConverter:
         self.historymask = []
         self.images = []
         self.current_image_index = 0
-        self.image = None
+        self.image = None   # PIL image in natural (un-zoomed) size — all drawing happens here
         self.mask = None
+
+        # Zoom
+        self.zoom_level = 1.0
 
         # Point-tracking state
         self.left_click_count = 0
         self.left_click_history = []
         self.half_check_history = []
 
-        # Right-click menu coordinates
+        # Right-click menu coordinates stored in IMAGE space
         self.menu_x = None
         self.menu_y = None
 
@@ -63,20 +65,39 @@ class PDFtoImageConverter:
         )
         self.export_button.grid(row=0, column=2, padx=10)
 
+
         self.who_is_this_label = tk.Label(self.button_frame, text="Who is this?")
         self.who_is_this_label.grid(row=1, column=0, pady=5)
 
         self.who_is_this_entry = tk.Entry(self.button_frame)
         self.who_is_this_entry.grid(row=1, column=1, pady=5)
 
-        self.canvas = tk.Canvas(self.root, width=600, height=800)
-        self.canvas.grid(row=2, column=0)
+        # ── Scrollable canvas (no fixed size — fills the window) ──
+        canvas_frame = tk.Frame(self.root)
+        canvas_frame.grid(row=2, column=0, sticky="nsew")
+        self.root.grid_rowconfigure(2, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(canvas_frame, bg="black")
+        v_scroll = tk.Scrollbar(canvas_frame, orient="vertical",   command=self.canvas.yview)
+        h_scroll = tk.Scrollbar(canvas_frame, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+
+        v_scroll.pack(side="right",  fill="y")
+        h_scroll.pack(side="bottom", fill="x")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
         self.canvas.focus_set()
 
         self.canvas.bind("<Button-1>", self.insert_image)
         self.canvas.bind("<Button-3>", self.save_image)
-        self.root.bind("<Button-2>", self.show_menu)
-        self.root.bind("<Command-z>", self.undo)
+        self.root.bind("<Button-2>",   self.show_menu)
+        self.root.bind("<Command-z>",  self.undo)
+
+        # Plain scroll to zoom — zooms about the cursor position
+        self.canvas.bind("<MouseWheel>", self.mouse_zoom)   # Mac / Windows
+        self.canvas.bind("<Button-4>",   self.mouse_zoom)   # Linux scroll up
+        self.canvas.bind("<Button-5>",   self.mouse_zoom)   # Linux scroll down
 
     def _build_menu(self):
         self.wrong_answer_images = [
@@ -103,6 +124,18 @@ class PDFtoImageConverter:
         for widget in (self.select_button, self.export_button):
             widget.configure(bg="black", fg="black")
 
+    # ── Coordinate mapping ────────────────────────────────────────────────────
+
+    def _canvas_to_image_coords(self, x, y):
+        """
+        Convert a canvas mouse position to the corresponding PIL image position,
+        accounting for both scroll offset and current zoom level.
+        All drawing operations must use these coordinates.
+        """
+        cx = self.canvas.canvasx(x)  # adjust for horizontal scroll
+        cy = self.canvas.canvasy(y)  # adjust for vertical scroll
+        return int(cx / self.zoom_level), int(cy / self.zoom_level)
+
     # ── PDF / image display ───────────────────────────────────────────────────
 
     def select_pdf(self):
@@ -113,11 +146,13 @@ class PDFtoImageConverter:
             self.images = convert_from_path(self.pdf_path, poppler_path=POPPLER_PATH)
             if self.images:
                 self.current_image_index = 0
+                self.zoom_level = 1.0
                 self.display_image(self.images[0])
 
     def display_next_image(self):
         if self.current_image_index < len(self.images) - 1:
             self.current_image_index += 1
+            self.zoom_level = 1.0
             self.display_image(self.images[self.current_image_index])
 
     def display_image(self, image):
@@ -125,11 +160,61 @@ class PDFtoImageConverter:
         image.thumbnail(max_size, Image.LANCZOS)
         inverted_image = ImageOps.invert(image.convert("RGB"))
 
-        tk_image = ImageTk.PhotoImage(inverted_image)
-        self.canvas.create_image(0, 0, anchor="nw", image=tk_image)
-        self.canvas.image = tk_image
-        self.image = inverted_image
+        self.image = inverted_image   # natural-size PIL image; never zoomed
         self._create_mask()
+        self._render()
+
+    def _render(self):
+        """
+        Scale self.image to the current zoom level for display only.
+        self.image itself is always kept at natural (1×) size so that
+        stamps and text are drawn at the correct resolution.
+        """
+        if self.image is None:
+            return
+        w = int(self.image.width  * self.zoom_level)
+        h = int(self.image.height * self.zoom_level)
+        display = self.image.resize((w, h), Image.LANCZOS)
+        tk_image = ImageTk.PhotoImage(display)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=tk_image)
+        self.canvas.image = tk_image                        # keep reference alive
+        self.canvas.configure(scrollregion=(0, 0, w, h))
+
+    # ── Zoom ──────────────────────────────────────────────────────────────────
+
+    def mouse_zoom(self, event):
+        """Zoom in/out centred on the mouse cursor position."""
+        if self.image is None:
+            return
+
+        old_zoom = self.zoom_level
+
+        if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
+            new_zoom = min(round(self.zoom_level + 0.25, 2), 4.0)
+        else:
+            new_zoom = max(round(self.zoom_level - 0.25, 2), 0.25)
+
+        if new_zoom == old_zoom:
+            return
+
+        # Canvas-space position of the cursor (accounts for current scroll)
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+
+        self.zoom_level = new_zoom
+        self._render()
+
+        # After re-render, scroll so that the image point under the cursor
+        # stays under the cursor.  new_cx/cy is where that point now lives.
+        new_w = self.image.width  * new_zoom
+        new_h = self.image.height * new_zoom
+        new_cx = cx * (new_zoom / old_zoom)
+        new_cy = cy * (new_zoom / old_zoom)
+
+        # xview_moveto expects a fraction of the total scroll region
+        self.canvas.xview_moveto(max(0, (new_cx - event.x) / new_w))
+        self.canvas.yview_moveto(max(0, (new_cy - event.y) / new_h))
 
     # ── Mask ──────────────────────────────────────────────────────────────────
 
@@ -144,7 +229,7 @@ class PDFtoImageConverter:
             return
 
         self.image = self.history.pop()
-        self.mask = self.historymask.pop()
+        self.mask  = self.historymask.pop()
 
         if self.left_click_history and self.left_click_history[-1]:
             self.left_click_count -= 1
@@ -154,9 +239,7 @@ class PDFtoImageConverter:
         self.left_click_history.pop()
         self.half_check_history.pop()
 
-        tk_image = ImageTk.PhotoImage(self.image)
-        self.canvas.create_image(0, 0, anchor="nw", image=tk_image)
-        self.canvas.image = tk_image
+        self._render()
 
     # ── Stamp helpers ─────────────────────────────────────────────────────────
 
@@ -177,17 +260,13 @@ class PDFtoImageConverter:
         self.historymask.append(self.mask.copy())
 
     def _paste_stamp(self, stamp, x, y, center=True):
+        """x, y must be in IMAGE coordinates (not canvas/zoom coordinates)."""
         if center:
-            x -= stamp.width // 2
+            x -= stamp.width  // 2
             y -= stamp.height // 2
         self.mask.paste(stamp, (x, y), stamp)
         self.image.paste(stamp, (x, y), stamp)
-        self._refresh_canvas()
-
-    def _refresh_canvas(self):
-        tk_image = ImageTk.PhotoImage(self.image)
-        self.canvas.create_image(0, 0, anchor="nw", image=tk_image)
-        self.canvas.image = tk_image
+        self._render()
 
     # ── Left-click: insert check mark ─────────────────────────────────────────
 
@@ -196,10 +275,11 @@ class PDFtoImageConverter:
             return
 
         self._save_state()
+        ix, iy = self._canvas_to_image_coords(event.x, event.y)
         stamp = self._resize_to_third(
             self._load_and_invert_stamp(self.insert_image_path)
         )
-        self._paste_stamp(stamp, event.x, event.y)
+        self._paste_stamp(stamp, ix, iy)
 
         self.left_click_count += 1
         self.left_click_history.append(True)
@@ -215,7 +295,7 @@ class PDFtoImageConverter:
         if not user_text:
             return
 
-        filename = f"graded{self.current_image_index}.png"
+        filename  = f"graded{self.current_image_index}.png"
         save_path = os.path.join(SAVE_DIRECTORY, filename)
 
         # Save only the annotation mask layer, re-inverted to normal colours
@@ -227,16 +307,16 @@ class PDFtoImageConverter:
         self.display_next_image()
 
         # Reset per-page state
-        self.left_click_count = 0
-        self.left_click_history = []
-        self.half_check_history = []
+        self.left_click_count    = 0
+        self.left_click_history  = []
+        self.half_check_history  = []
         self.who_is_this_entry.delete(0, "end")
 
     # ── Middle-click menu ─────────────────────────────────────────────────────
 
     def show_menu(self, event):
-        self.menu_x = event.x
-        self.menu_y = event.y
+        # Always store in image coordinates so menu actions place correctly
+        self.menu_x, self.menu_y = self._canvas_to_image_coords(event.x, event.y)
         self.menu.post(event.x_root, event.y_root)
 
     def menu_action(self, img_file):
@@ -280,12 +360,13 @@ class PDFtoImageConverter:
             return
 
         self._save_state()
-        font = ImageFont.truetype(FONT_PATH, 20)
-        draw = ImageDraw.Draw(self.image)
-        drawmask = ImageDraw.Draw(self.mask)
-        draw.text((self.menu_x, self.menu_y), text, font=font, fill="cyan")
+        font      = ImageFont.truetype(FONT_PATH, 20)
+        draw      = ImageDraw.Draw(self.image)
+        drawmask  = ImageDraw.Draw(self.mask)
+        # menu_x/y are already in image coordinates
+        draw.text((self.menu_x, self.menu_y),     text, font=font, fill="cyan")
         drawmask.text((self.menu_x, self.menu_y), text, font=font, fill="cyan")
-        self._refresh_canvas()
+        self._render()
 
         self.left_click_history.append(False)
         self.half_check_history.append(False)
@@ -325,4 +406,4 @@ class PDFtoImageConverter:
 if __name__ == "__main__":
     root = tk.Tk()
     app = PDFtoImageConverter(root)
-    root.mainloop()# Write your code here :-)
+    root.mainloop()
